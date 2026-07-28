@@ -1,0 +1,14 @@
+# Research Tool Key Pool — docker-compose
+# 使用:docker compose up -d
+# 首次启动会在 ./data 生成 SQLite,在 ./config.toml 生成随机密钥配置
+# ⚠️ config.toml 含加密密钥,必须持久化;丢失则库内已加密的真实 API key 无法解密
+services:
+  keypool:
+    image: ghcr.io/arsonist-g/research-tool-key-pool:latest
+    container_name: keypool
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data              # SQLite 数据库(持久化)
+      - ./config.toml:/app/config.toml   # 密钥配置(必须持久化)
+    restart: unless-stopped

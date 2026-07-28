@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>登录 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div class="center-login" x-data="login()">
+  <form class="login-box" @submit.prevent="submit">
+    <h1>◈ Research Tool Key Pool</h1>
+    <div class="form-row">
+      <label>用户名</label>
+      <input x-model="username" required autocomplete="username" />
+    </div>
+    <div class="form-row">
+      <label>密码</label>
+      <input type="password" x-model="password" required autocomplete="current-password" />
+    </div>
+    <button class="btn btn-primary" type="submit" style="width:100%;justify-content:center" :disabled="loading">
+      <span x-show="!loading">登录</span>
+      <span x-show="loading">登录中…</span>
+    </button>
+    <p class="muted" style="font-size:12px;margin-top:16px;color:var(--danger)" x-show="err" x-text="err" x-cloak></p>
+  </form>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function login() {
+  return {
+    username: '', password: '', loading: false, err: '',
+    async submit() {
+      this.loading = true; this.err = '';
+      try {
+        const r = await fetch('/api/v1/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ username: this.username, password: this.password }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.err = d.detail || '登录失败';
+          this.loading = false;
+          return;
+        }
+        location.href = '/dashboard';
+      } catch (e) {
+        this.err = '网络错误';
+        this.loading = false;
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>

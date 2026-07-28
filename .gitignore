@@ -1,0 +1,39 @@
+# Rust 构建产物
+/target
+**/*.rs.bk
+
+# 运行时数据 / 数据库
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# 配置文件(含密钥,绝不入库)
+/config.toml
+
+# 凭证 / 需求原始记录(含真实密钥,绝不入库)
+/sample.md
+/sketch.md
+
+# 设计稿 / 内部文档(仅本地,不上传)
+/pm-design/
+/backend-design/
+/frontend-design/
+/system-architecture/
+/task-tracker/
+/tmp-doc/
+/doc/
+
+# IDE
+/.vscode/
+/.idea/
+*.swp
+*.swo
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 临时输出
+*.output
+*.log

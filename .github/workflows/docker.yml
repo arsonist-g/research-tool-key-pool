@@ -1,0 +1,52 @@
+# 每次 push 到主分支:构建多架构镜像并推送到 GHCR
+#   - 架构:linux/amd64 + linux/arm64
+#   - 版本号:commit 短 SHA(前 7 位,GitHub 短 SHA 标准)
+#   - 每次构建同步刷新 latest
+#   - 镜像名:ghcr.io/<仓库 owner 小写>/research-tool-key-pool(owner 从 Actions 环境取,无需硬编码)
+name: docker
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像名与版本号
+        id: meta
+        run: |
+          # owner 从当前仓库环境取并转小写(GHCR 镜像路径要求小写)
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # 短 SHA 前 7 位(GitHub 短 SHA 默认 7 位;如需 6 位把 cut -c1-7 改为 cut -c1-6)
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image=ghcr.io/${OWNER}/research-tool-key-pool" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并推送(amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

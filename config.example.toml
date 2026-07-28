@@ -1,0 +1,36 @@
+# Research Tool Key Pool — 配置示例
+# 首次启动若 config.toml 不存在,会自动生成本文件(随机密钥)。此处仅作字段说明。
+# 生成的 config.toml 含真实密钥,已在 .gitignore 排除,切勿提交到 git。
+
+# 监听地址
+listen = "0.0.0.0:8787"
+
+# SQLite 路径(放 data/ 便于挂载持久化)
+database_url = "sqlite:data/keypool.db?mode=rwc"
+
+# AES-256 主密钥:加密上传到号池的真实 API key(由它派生加密密钥)。
+# 泄露 = 库内已加密的真实 key 可被解出。首次随机生成(64 位十六进制)。
+master_key = "首次启动自动生成,请勿手填"
+
+# 管理员会话 cookie(kp_session)的 HMAC 签名密钥。
+# 泄露 = 可伪造管理员会话。首次随机生成。
+session_secret = "首次启动自动生成,请勿手填"
+
+# 管理 API 自动化鉴权:作为 X-Admin-Key 头值,用于脚本/CI 调 /api/v1/admin/*(替代浏览器登录)。
+# 能调所有管理接口(平台/号/代理组/Token/日志/设置),但不能改密码/查自己(需登录会话)。
+# 首次随机生成 admin_xxx。
+admin_key = "admin_首次启动自动生成,请勿手填"
+
+# 代理组同步间隔(秒)—— 初始默认;运行时可在「设置」页在线改
+sync_interval_secs = 300
+
+# 调用日志最大占用(MB)—— 超过删最旧;0 = 不限
+log_max_mb = 100
+
+# 管理员账号(可选,最高优先级):
+# 填了 admin_user + admin_password → 每次启动以此覆盖数据库
+#   (改这里 + 重启容器即可改用户名/密码;忘密码去服务器看挂载的 config.toml 即可恢复)
+# 不填 → 首次启动随机生成密码并打印到日志(docker logs keypool),之后存库
+# 建议生产填上,既固定又可恢复
+# admin_user = "admin"
+# admin_password = "change-me-to-a-strong-password"

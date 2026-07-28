@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>设置 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="settings()" x-init="load()" x-cloak>
+    <div class="page-head"><h1>设置</h1></div>
+
+    <div class="narrow-col">
+      <div class="card">
+        <h3 class="sec-title">系统配置</h3>
+        <div class="form-row">
+          <label>代理组同步间隔(秒,默认 300 = 5 分钟,对齐上游检测)</label>
+          <input type="number" x-model.number="cfg.sync_interval_secs" placeholder="300" />
+        </div>
+        <div class="form-row">
+          <label>余额同步间隔(秒,默认 900;只查近期调用过的号)</label>
+          <input type="number" x-model.number="cfg.balance_sync_interval_secs" placeholder="900" />
+        </div>
+        <div class="form-row">
+          <label>转发重试上限(默认 3,候选号都失败则降级返回)</label>
+          <input type="number" x-model.number="cfg.max_retries" placeholder="3" />
+        </div>
+        <div class="form-row">
+          <label>单号并发上限(默认 3,对之后上传的号生效)</label>
+          <input type="number" x-model.number="cfg.account_concurrency" placeholder="3" />
+        </div>
+        <div class="form-row">
+          <label>调用日志最大占用(MB,超过删最旧;0 = 不限)</label>
+          <input type="number" x-model.number="cfg.log_max_mb" placeholder="100" />
+        </div>
+        <button class="btn btn-primary" @click="saveCfg()" :disabled="cfgBusy">保存配置</button>
+        <div class="muted" style="font-size:var(--fs-xs);margin-top:8px">间隔 / 重试 / 日志阈值 下次循环即生效;单号并发对之后上传的号生效;上游超时在各平台页按平台单独配置。</div>
+      </div>
+
+      <div class="card">
+        <h3 class="sec-title">修改密码</h3>
+        <div class="form-row"><label>当前密码</label><input type="password" x-model="pw.old" autocomplete="current-password" /></div>
+        <div class="form-row"><label>新密码</label><input type="password" x-model="pw.new" autocomplete="new-password" /></div>
+        <button class="btn btn-primary" @click="changePass()" :disabled="pw.busy">保存</button>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function settings() {
+  return {
+    me: null,
+    cfg: { sync_interval_secs: 300, balance_sync_interval_secs: 900, max_retries: 3, account_concurrency: 3, log_max_mb: 100 },
+    cfgBusy: false,
+    pw: { old: '', new: '', busy: false },
+    async load() {
+      try {
+        this.me = await guardNav('settings');
+        this.cfg = await api('/settings');
+      } catch (e) {}
+    },
+    async saveCfg() {
+      this.cfgBusy = true;
+      try {
+        this.cfg = await api('/settings', { method: 'PUT', body: {
+          sync_interval_secs: Number(this.cfg.sync_interval_secs),
+          balance_sync_interval_secs: Number(this.cfg.balance_sync_interval_secs),
+          max_retries: Number(this.cfg.max_retries),
+          account_concurrency: Number(this.cfg.account_concurrency),
+          log_max_mb: Number(this.cfg.log_max_mb),
+        } });
+        toast('配置已保存', 'ok');
+      } catch (e) { toast(String(e), 'err'); }
+      this.cfgBusy = false;
+    },
+    async changePass() {
+      if (!this.pw.old || !this.pw.new) { toast('请填写完整', 'err'); return; }
+      this.pw.busy = true;
+      try {
+        await api('/me', { method: 'PATCH', body: { old_password: this.pw.old, new_password: this.pw.new } });
+        toast('密码已修改', 'ok');
+        this.pw = { old: '', new: '', busy: false };
+      } catch (e) { toast(String(e), 'err'); this.pw.busy = false; }
+    },
+  };
+}
+</script>
+</body>
+</html>

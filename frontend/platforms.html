@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>平台 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="platforms()" x-init="load()" x-cloak>
+    <div class="page-head"><h1>平台</h1></div>
+    <div class="grid-cards">
+      <template x-for="p in list" :key="p.slug">
+        <div class="card">
+          <div class="between" style="margin-bottom:12px">
+            <div>
+              <h3 class="mono accent-text" style="margin:0;font-size:var(--fs-md)" x-text="p.slug"></h3>
+              <div class="mono muted" style="font-size:var(--fs-xs);margin-top:2px" x-text="'上游 ' + p.base_url"></div>
+            </div>
+            <span x-html="statusBadge(p.enabled?'available':'manual_disabled')"></span>
+          </div>
+          <div class="muted" style="font-size:var(--fs-sm);margin-bottom:12px" x-text="p.display_name"></div>
+
+          <div class="form-row">
+            <label>绑定代理组(可多选,调度从并集选代理)</label>
+            <button class="btn btn-sm" @click="openBind(p)" x-text="'已绑 ' + (p.proxy_group_ids||[]).length + ' 个组 · 点击修改'"></button>
+          </div>
+
+          <div class="form-row">
+            <label>并发上限</label>
+            <input type="number" x-model.number="p.max_concurrency" @change="save(p)" />
+          </div>
+
+          <div class="form-row"><label>封号码(逗号分隔,命中即永久剔除;默认 401)</label><input x-model="p.revoke_codes" @change="save(p)" placeholder="401" /></div>
+          <div class="form-row"><label>限流码(逗号分隔,命中则退避重试不停号;默认 429)</label><input x-model="p.rate_limit_codes" @change="save(p)" placeholder="429" /></div>
+          <div class="form-row"><label>上游超时(秒,经代理转发到该平台的最长等待;长任务如 crawl 调高,默认 120)</label><input type="number" x-model.number="p.upstream_timeout_secs" @change="save(p)" placeholder="120" /></div>
+
+          <div class="form-row field-inline">
+            <label style="margin:0;cursor:pointer">
+              <input type="checkbox" x-model="p.same_ip_isolation" @change="save(p)" style="width:auto" />
+              同 IP 不连续调用
+            </label>
+          </div>
+
+          <template x-if="!p.supports_balance_query">
+            <div class="form-row"><label>额度上限默认值(不填则不估)</label><input type="number" x-model.number="p.default_quota_limit" @change="save(p)" /></div>
+          </template>
+          <template x-if="p.supports_balance_query">
+            <div class="form-row"><div class="muted" style="font-size:var(--fs-xs)">该平台支持余额查询,剩余额度由系统自动同步,无需设上限</div></div>
+          </template>
+
+          <div class="between" style="margin-top:12px">
+            <button class="btn btn-sm" @click="toggle(p)" x-text="p.enabled?'停用':'启用'"></button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- 绑定代理组弹窗(搜索 + 分页 + 多选)-->
+    <div class="modal-bg" x-show="bind.show" @click.self="bind.show=false" x-cloak>
+      <div class="modal">
+        <h3 class="sec-title">绑定代理组 · <span class="mono accent-text" x-text="bind.slug"></span></h3>
+        <div class="form-row"><input x-model="bind.search" @input="filterGroups()" placeholder="搜索组名" /></div>
+        <div class="check-list">
+          <template x-for="g in bind.filtered" :key="g.id">
+            <label class="check-item">
+              <input type="checkbox" :value="g.id" x-model="bind.selected" />
+              <span x-text="g.name + ' · ' + (g.proxy_count||0) + ' 代理'"></span>
+            </label>
+          </template>
+          <div class="muted" x-show="!bind.filtered.length" style="font-size:var(--fs-xs)">无匹配组</div>
+        </div>
+        <div class="more-row" x-show="bind.has_more">
+          <button class="btn btn-sm" @click="loadMoreGroups()">加载更多</button>
+        </div>
+        <div class="between" style="margin-top:12px">
+          <button class="btn" @click="bind.show=false">取消</button>
+          <button class="btn btn-primary" @click="confirmBind()" x-text="'确认(' + bind.selected.length + ')'"></button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function platforms() {
+  return {
+    list: [], groups: [],
+    bind: { show: false, slug: '', platform: null, selected: [], search: '', filtered: [], has_more: false, page: 1 },
+    async load() {
+      try {
+        await guardNav('platforms');
+        const [p, g] = await Promise.all([api('/platforms'), api('/proxy-groups')]);
+        this.list = p; this.groups = g;
+      } catch (e) {}
+    },
+    openBind(p) {
+      const all = this.groups.slice(0, 20);
+      this.bind = { show: true, slug: p.slug, platform: p, selected: (p.proxy_group_ids||[]).map(Number), search: '', filtered: all, has_more: this.groups.length > 20, page: 1 };
+    },
+    filterGroups() {
+      const q = this.bind.search.trim().toLowerCase();
+      const all = q ? this.groups.filter(g => (g.name||'').toLowerCase().includes(q)) : this.groups;
+      this.bind.page = 1;
+      this.bind.filtered = all.slice(0, 20);
+      this.bind.has_more = all.length > this.bind.filtered.length;
+    },
+    loadMoreGroups() {
+      const q = this.bind.search.trim().toLowerCase();
+      const all = q ? this.groups.filter(g => (g.name||'').toLowerCase().includes(q)) : this.groups;
+      this.bind.page += 1;
+      this.bind.filtered = all.slice(0, this.bind.page * 20);
+      this.bind.has_more = all.length > this.bind.filtered.length;
+    },
+    async confirmBind() {
+      const p = this.bind.platform;
+      p.proxy_group_ids = this.bind.selected;
+      await this.save(p);
+      this.bind.show = false;
+    },
+    async save(p) {
+      try {
+        await api('/platforms/' + p.slug, { method: 'PATCH', body: {
+          proxy_group_ids: (p.proxy_group_ids || []).map(Number),
+          max_concurrency: p.max_concurrency,
+          same_ip_isolation: p.same_ip_isolation,
+          revoke_codes: p.revoke_codes,
+          rate_limit_codes: p.rate_limit_codes,
+          upstream_timeout_secs: p.upstream_timeout_secs,
+          default_quota_limit: p.default_quota_limit,
+        } });
+        toast('已保存', 'ok');
+      } catch (e) { toast(String(e), 'err'); this.load(); }
+    },
+    async toggle(p) {
+      try { await api('/platforms/' + p.slug + '/' + (p.enabled ? 'disable' : 'enable'), { method: 'POST' }); this.load(); }
+      catch (e) { toast(String(e), 'err'); }
+    },
+  };
+}
+</script>
+</body>
+</html>

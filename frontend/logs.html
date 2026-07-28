@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>调用日志 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="logs()" x-init="load()" x-cloak>
+    <div class="page-head"><h1>调用日志</h1></div>
+    <div class="filters">
+      <select x-model="f.platform" @change="reload()">
+        <option value="">全部平台</option>
+        <option value="context7">context7</option>
+        <option value="exa">exa</option>
+        <option value="firecrawl">firecrawl</option>
+        <option value="tavily">tavily</option>
+      </select>
+      <input x-model="f.account" @change="reload()" placeholder="号 ID" />
+      <input x-model="f.token" @change="reload()" placeholder="Token ID" />
+      <span class="muted count-label" x-text="'共 ' + (data.total||0) + (data.has_more ? '(更多未加载)':'')"></span>
+    </div>
+    <table>
+      <thead><tr><th>时间</th><th>平台</th><th>端点</th><th>号</th><th>状态码</th><th>耗时</th><th>重试</th><th>结果</th></tr></thead>
+      <tbody>
+        <template x-for="l in data.items || []" :key="l.id">
+          <tr>
+            <td class="muted" style="white-space:nowrap" x-text="fmtTime(l.created_at)"></td>
+            <td class="mono" x-text="l.platform_slug"></td>
+            <td class="mono muted" x-text="(l.endpoint||'').slice(0,40)"></td>
+            <td x-text="l.account_id ?? '—'"></td>
+            <td><span :style="codeColor(l.status_code)" x-text="l.status_code ?? '—'"></span></td>
+            <td x-text="l.duration_ms!=null ? l.duration_ms+'ms' : '—'"></td>
+            <td x-text="l.retry_count"></td>
+            <td><span :style="l.success?'color:var(--ok)':'color:var(--danger)'" x-text="l.success?'成功':'失败'"></span></td>
+          </tr>
+        </template>
+        <tr x-show="!((data.items||[]).length)"><td colspan="8" class="muted" style="text-align:center;padding:24px">无调用记录</td></tr>
+      </tbody>
+    </table>
+    <div class="more-row" x-show="data.has_more">
+      <button class="btn" @click="loadMore()">加载更多</button>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function logs() {
+  return {
+    data: {}, f: { platform: '', account: '', token: '' },
+    async load() { try { await guardNav('logs'); await this.reload(); } catch (e) {} },
+    async reload() {
+      const q = new URLSearchParams();
+      if (this.f.platform) q.set('platform', this.f.platform);
+      if (this.f.account) q.set('account', this.f.account);
+      if (this.f.token) q.set('token', this.f.token);
+      try { this.data = await api('/call-logs?' + q.toString()); } catch (e) { toast(String(e), 'err'); }
+    },
+    async loadMore() {
+      if (!this.data.next_cursor) return;
+      const q = new URLSearchParams();
+      if (this.f.platform) q.set('platform', this.f.platform);
+      if (this.f.account) q.set('account', this.f.account);
+      if (this.f.token) q.set('token', this.f.token);
+      q.set('cursor', this.data.next_cursor);
+      try {
+        const m = await api('/call-logs?' + q.toString());
+        this.data.items = (this.data.items || []).concat(m.items || []);
+        this.data.has_more = m.has_more; this.data.next_cursor = m.next_cursor;
+      } catch (e) { toast(String(e), 'err'); }
+    },
+    codeColor(c) {
+      if (c == null) return '';
+      if (c >= 200 && c < 300) return 'color:var(--ok)';
+      if (c >= 500) return 'color:var(--danger)';
+      if (c === 429) return 'color:var(--warn)';
+      if (c >= 400) return 'color:var(--danger)';
+      return '';
+    },
+  };
+}
+</script>
+</body>
+</html>

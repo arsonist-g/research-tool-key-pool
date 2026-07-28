@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>号池 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="accounts()" x-init="load()" x-cloak>
+    <div class="page-head">
+      <h1>号池</h1>
+      <button class="btn btn-primary" @click="openUpload()">+ 上传号</button>
+    </div>
+
+    <!-- 平台切换条:点击切平台,默认只看一个平台,不再混在一起 -->
+    <div class="tabs">
+      <template x-for="slug in platforms" :key="slug">
+        <button class="tab" :class="{active: tab===slug}" @click="switchTab(slug)" x-text="slug"></button>
+      </template>
+    </div>
+
+    <div class="filters">
+      <select x-model="f.status" @change="reload()">
+        <option value="">全部状态</option>
+        <option value="healthy">健康</option>
+        <option value="pending">待激活</option>
+        <option value="manual_disabled">已停用</option>
+        <option value="hard_revoked">已失效</option>
+      </select>
+      <span class="mono muted" style="font-size:var(--fs-xs)" x-text="'接入 ' + origin + '/' + tab + '/{端点}'"></span>
+      <span class="muted count-label" x-text="tab + ' · 共 ' + (data.total||0) + ' 个号'"></span>
+    </div>
+
+    <div class="loading" x-show="loading">加载中…</div>
+    <div class="grid-cards" x-show="!loading">
+      <template x-for="a in data.items || []" :key="a.id">
+        <div class="card acct-card" @click="openDetail(a.id)">
+          <div class="top">
+            <div>
+              <div class="mono" style="font-size:var(--fs-sm);color:var(--accent)" x-text="a.platform_slug"></div>
+              <div class="key" x-text="a.key_preview"></div>
+            </div>
+            <span x-html="statusBadge(a.status)"></span>
+          </div>
+          <div class="bar" :class="barClass(usedPct(a))"><span :style="'width:'+usedPct(a)+'%'"></span></div>
+          <div class="meta">
+            <span>调用 <span x-text="a.quota_used"></span><span class="muted" x-text="a.quota_limit?'/'+a.quota_limit:''"></span></span>
+            <span x-text="a.registration_ip ? 'IP '+a.registration_ip : '无注册IP'"></span>
+          </div>
+        </div>
+      </template>
+      <div class="empty" x-show="!loading && !(data.items&&data.items.length)" style="grid-column:1/-1">
+        该平台下无号 —— 点「上传号」添加
+      </div>
+    </div>
+    <div class="more-row" x-show="data.has_more">
+      <button class="btn" @click="loadMore()">加载更多</button>
+    </div>
+
+    <!-- 上传 Modal -->
+    <div class="modal-bg" x-show="upload.show" @click.self="upload.show=false" x-cloak>
+      <div class="modal">
+        <h3>上传号</h3>
+        <div class="form-row">
+          <label>平台</label>
+          <select x-model="upload.platform">
+            <template x-for="slug in platforms" :key="slug"><option :value="slug" x-text="slug"></option></template>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>API key 列表(每行一个,可在 key 后加 ,1.2.3.4 表示注册IP)</label>
+          <textarea x-model="upload.keys" rows="6" placeholder="每行一个 key&#10;key,1.2.3.4"></textarea>
+        </div>
+        <div class="form-row">
+          <label>额度上限(可选,覆盖平台默认)</label>
+          <input type="number" x-model.number="upload.quota" placeholder="留空用平台默认" />
+        </div>
+        <div class="between">
+          <button class="btn" @click="upload.show=false">取消</button>
+          <button class="btn btn-primary" @click="submitUpload()" :disabled="upload.busy">上传</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 详情 Modal -->
+    <div class="modal-bg" x-show="detail.show" @click.self="detail.show=false" x-cloak>
+      <div class="modal" x-show="!detail.loading">
+        <template x-if="detail.data">
+          <div>
+            <h3 x-text="detail.data.account.platform_slug + ' / ' + detail.data.account.key_preview"></h3>
+            <div class="form-row"><label>状态</label><span x-html="statusBadge(detail.data.account.status)"></span></div>
+            <div class="form-row"><label>额度</label>
+              <div x-text="'已用 ' + detail.data.account.quota_used + (detail.data.account.quota_limit?(' / 上限 '+detail.data.account.quota_limit):'(无上限)')"></div>
+              <div x-text="detail.data.account.quota_estimated_remaining!=null ? ('估算剩余 '+detail.data.account.quota_estimated_remaining) : ''"></div>
+            </div>
+            <div class="form-row"><label>注册 IP</label><span class="mono" x-text="detail.data.account.registration_ip || '—'"></span></div>
+            <div class="form-row" x-show="detail.data.proxy"><label>绑定代理</label>
+              <span class="mono" x-text="detail.data.proxy ? (detail.data.proxy.host+':'+detail.data.proxy.port) : '—'"></span>
+              <span class="muted" x-text="detail.data.proxy ? ('· '+countryFlag(detail.data.proxy.country_code)+' · exit '+detail.data.proxy.exit_ip) : ''"></span>
+            </div>
+            <div class="form-row"><label>额度刷新</label><span x-text="fmtTime(detail.data.account.reset_at)"></span></div>
+            <div class="form-row"><label>最近调用</label><span x-text="fmtTime(detail.data.account.last_called_at)"></span></div>
+            <div class="between" style="margin-top:16px">
+              <button class="btn btn-danger btn-sm" @click="del(detail.data.account.id)">删除</button>
+              <div class="row">
+                <button class="btn btn-sm" @click="toggle(detail.data.account, 'manual_disabled')" x-show="detail.data.account.status!=='manual_disabled'">停用</button>
+                <button class="btn btn-sm" @click="toggle(detail.data.account, 'healthy')" x-show="detail.data.account.status==='manual_disabled'">启用</button>
+                <button class="btn" @click="detail.show=false">关闭</button>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+const PLATFORMS = ['context7','exa','firecrawl','tavily'];
+function accounts() {
+  return {
+    platforms: PLATFORMS,
+    origin: location.origin,
+    tab: 'context7',
+    data: {}, loading: false,
+    f: { status: '' },
+    upload: { show: false, platform: 'context7', keys: '', quota: '', busy: false },
+    detail: { show: false, loading: false, data: null },
+    async load() {
+      try {
+        await guardNav('accounts');
+        await this.reload();
+      } catch (e) {}
+    },
+    switchTab(slug) { this.tab = slug; this.reload(); },
+    async reload() {
+      this.loading = true;
+      try {
+        const q = new URLSearchParams();
+        q.set('platform', this.tab);
+        if (this.f.status) q.set('status', this.f.status);
+        this.data = await api('/accounts?' + q.toString());
+      } catch (e) { toast(String(e), 'err'); }
+      this.loading = false;
+    },
+    openUpload() { this.upload.platform = this.tab; this.upload.keys = ''; this.upload.quota = ''; this.upload.show = true; },
+    async loadMore() {
+      if (!this.data.next_cursor) return;
+      const q = new URLSearchParams();
+      q.set('platform', this.tab);
+      if (this.f.status) q.set('status', this.f.status);
+      q.set('cursor', this.data.next_cursor);
+      try {
+        const more = await api('/accounts?' + q.toString());
+        this.data.items = (this.data.items || []).concat(more.items || []);
+        this.data.has_more = more.has_more;
+        this.data.next_cursor = more.next_cursor;
+      } catch (e) { toast(String(e), 'err'); }
+    },
+    usedPct(a) {
+      if (!a.quota_limit) return a.quota_estimated_remaining != null ? 100 - Math.min(100, a.quota_estimated_remaining) : 0;
+      return Math.min(100, Math.round((a.quota_used / a.quota_limit) * 100));
+    },
+    async submitUpload() {
+      this.upload.busy = true;
+      const lines = this.upload.keys.split('\n').map(s => s.trim()).filter(Boolean);
+      const accounts = lines.map(l => {
+        const [api_key, ip] = l.split(',').map(s => s.trim());
+        return { api_key, registration_ip: ip || null };
+      });
+      try {
+        const r = await api(`/platforms/${this.upload.platform}/accounts`, {
+          method: 'POST',
+          body: { accounts, default_quota_limit: this.upload.quota || null },
+        });
+        toast('已上传 ' + (r.created?.length || 0) + ' 个号', 'ok');
+        this.upload.show = false;
+        this.tab = this.upload.platform;
+        this.reload();
+      } catch (e) { toast(String(e), 'err'); }
+      this.upload.busy = false;
+    },
+    async openDetail(id) {
+      this.detail = { show: true, loading: true, data: null };
+      try { this.detail.data = await api('/accounts/' + id); } catch (e) { toast(String(e), 'err'); }
+      this.detail.loading = false;
+    },
+    async toggle(acc, target) {
+      try {
+        await api(`/accounts/${acc.id}/${target === 'healthy' ? 'enable' : 'disable'}`, { method: 'POST' });
+        toast('已更新', 'ok');
+        this.openDetail(acc.id);
+        this.reload();
+      } catch (e) { toast(String(e), 'err'); }
+    },
+    async del(id) {
+      if (!confirm('确认删除该号?此操作不可撤销。')) return;
+      try {
+        await api('/accounts/' + id, { method: 'DELETE' });
+        toast('已删除', 'ok');
+        this.detail.show = false;
+        this.reload();
+      } catch (e) { toast(String(e), 'err'); }
+    },
+  };
+}
+</script>
+</body>
+</html>

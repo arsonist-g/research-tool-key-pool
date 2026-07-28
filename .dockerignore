@@ -1,0 +1,22 @@
+# 不进构建上下文的内容(加速构建、避免泄漏本地状态)
+target/
+data/
+.git/
+.github/
+.vscode/
+.idea/
+
+# 文档 / 设计稿(运行时不需要)
+*.md
+doc/
+task-tracker/
+pm-design/
+backend-design/
+frontend-design/
+system-architecture/
+tmp-doc/
+
+# 本地配置与数据库(容器内首次启动自动生成)
+config.toml
+**/*.db
+**/*.db-*

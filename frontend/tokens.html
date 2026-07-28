@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>分发 Token - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="tokens()" x-init="load()" x-cloak>
+    <div class="page-head">
+      <h1>分发 Token</h1>
+      <button class="btn btn-primary" @click="openCreate()">+ 新建 Token</button>
+    </div>
+    <table>
+      <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>调用次数</th><th>可调平台</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody>
+        <template x-for="t in list" :key="t.id">
+          <tr>
+            <td x-text="t.name"></td>
+            <td class="mono muted" x-text="t.token_prefix + '…'"></td>
+            <td><span x-html="statusBadge(t.status)"></span></td>
+            <td x-text="t.call_count"></td>
+            <td class="mono muted" x-text="(t.platforms||[]).join(', ')"></td>
+            <td class="muted" x-text="fmtTime(t.created_at)"></td>
+            <td>
+              <button class="btn btn-sm btn-danger" @click="del(t.id)">删除</button>
+            </td>
+          </tr>
+        </template>
+        <tr x-show="!list.length"><td colspan="7" class="muted" style="text-align:center;padding:16px">无 token</td></tr>
+      </tbody>
+    </table>
+
+    <!-- 创建 Modal -->
+    <div class="modal-bg" x-show="c.show" @click.self="c.show=false" x-cloak>
+      <div class="modal">
+        <h3>新建 Token</h3>
+        <div class="form-row"><label>名称 / 用途</label><input x-model="c.name" placeholder="如 自用-research" /></div>
+        <div class="form-row"><label>可调平台(勾选后显示调用方接入地址)</label>
+          <div class="check-list">
+            <template x-for="p in platforms" :key="p.slug">
+              <label class="check-item">
+                <input type="checkbox" :value="p.slug" x-model="c.platforms" style="width:auto" />
+                <span x-text="p.slug"></span>
+                <span class="mono muted" style="font-size:var(--fs-xs);margin-left:6px" x-show="c.platforms.includes(p.slug)" x-text="origin + '/' + p.slug"></span>
+              </label>
+            </template>
+          </div>
+        </div>
+        <div class="between">
+          <button class="btn" @click="c.show=false">取消</button>
+          <button class="btn btn-primary" @click="create()" :disabled="c.busy">创建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 明文展示 Modal(一次) -->
+    <div class="modal-bg" x-show="created.show" x-cloak>
+      <div class="modal">
+        <h3 style="color:var(--warn)">⚠ Token 仅此一次展示</h3>
+        <p class="muted" style="font-size:var(--fs-sm);margin-bottom:16px">关闭后无法再查看,请立即复制保存。</p>
+        <div style="display:flex;gap:8px;align-items:stretch">
+          <div class="mono" style="flex:1;background:var(--bg-inset);padding:12px;border-radius:6px;word-break:break-all" x-text="created.token"></div>
+          <button class="btn btn-primary" @click="copyToken()" style="white-space:nowrap">复制</button>
+        </div>
+
+        <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+          <div style="font-size:var(--fs-sm);margin-bottom:6px"><b>调用方式</b>:把原 API 的 base URL 换成下方接入地址,后接原 API 的端点路径,请求体不变,认证统一用本 Token</div>
+          <div class="mono muted" style="font-size:var(--fs-xs);margin-bottom:8px">Authorization: Bearer &lt;本Token&gt;</div>
+          <template x-for="slug in created.platforms || []" :key="slug">
+            <div class="mono between" style="font-size:var(--fs-xs);margin-bottom:4px">
+              <span><span class="accent-text" x-text="slug"></span>&nbsp;·&nbsp;<span x-text="origin + '/' + slug + '/{端点}'"></span></span>
+              <button class="btn btn-sm" @click="copyAccess(slug)">复制</button>
+            </div>
+          </template>
+          <pre class="mono muted" style="font-size:var(--fs-xs);margin-top:10px;white-space:pre-wrap;word-break:break-all;background:var(--bg-inset);padding:10px;border-radius:6px" x-text="curlExample()"></pre>
+        </div>
+
+        <div style="margin-top:16px;text-align:right">
+          <button class="btn btn-primary" @click="created.show=false">我已保存</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function tokens() {
+  return {
+    list: [], platforms: [],
+    origin: location.origin,
+    c: { show: false, name: '', platforms: [], busy: false },
+    created: { show: false, token: '', platforms: [] },
+    async load() {
+      try {
+        await guardNav('tokens');
+        const [t, p] = await Promise.all([api('/tokens'), api('/platforms')]);
+        this.list = t; this.platforms = p;
+      } catch (e) {}
+    },
+    openCreate() { this.c = { show: true, name: '', platforms: ['tavily'], busy: false }; },
+    async create() {
+      if (!this.c.name) { toast('请填名称', 'err'); return; }
+      this.c.busy = true;
+      try {
+        const r = await api('/tokens', { method: 'POST', body: { name: this.c.name, platforms: this.c.platforms } });
+        const selected = this.c.platforms.slice();
+        this.c.show = false;
+        this.created = { show: true, token: r.token, platforms: selected };
+        this.list = await api('/tokens');
+      } catch (e) { toast(String(e), 'err'); }
+      this.c.busy = false;
+    },
+    copyToken() {
+      navigator.clipboard.writeText(this.created.token).then(() => toast('已复制', 'ok'));
+    },
+    copyAccess(slug) {
+      navigator.clipboard.writeText(this.origin + '/' + slug).then(() => toast('已复制接入地址', 'ok'));
+    },
+    curlExample() {
+      const slug = (this.created.platforms && this.created.platforms[0]) || 'platform';
+      return 'curl -X POST ' + this.origin + '/' + slug + '/search \\\n' +
+        '  -H "Authorization: Bearer ' + this.created.token + '" \\\n' +
+        '  -H "Content-Type: application/json" \\\n' +
+        "  -d '{ ...原 API 的请求体... }'";
+    },
+    async del(id) {
+      if (!confirm('确认删除该 token?删除后调用方立即无法使用,此操作不可撤销。')) return;
+      try { await api('/tokens/' + id, { method: 'DELETE' }); toast('已删除', 'ok'); this.list = await api('/tokens'); } catch (e) { toast(String(e), 'err'); }
+    },
+  };
+}
+</script>
+</body>
+</html>

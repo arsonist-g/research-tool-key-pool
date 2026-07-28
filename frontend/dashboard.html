@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>仪表盘 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="dashboard()" x-init="load()" x-cloak>
+    <div class="page-head"><h1>仪表盘</h1><span class="muted" style="font-size:var(--fs-sm)">v0.1.0</span></div>
+    <div class="stat-row">
+      <div class="stat-tile">
+        <div class="label">今日调用</div>
+        <div class="value mono" x-text="data.totals?.calls_today ?? '—'"></div>
+        <div class="sub">成功率 <span x-text="pct(data.totals?.success_rate)"></span></div>
+      </div>
+      <template x-for="p in data.platforms || []" :key="p.slug">
+        <div class="stat-tile">
+          <div class="label" x-text="p.slug"></div>
+          <div class="value mono">
+            <span style="color:var(--ok)" x-text="p.healthy"></span><span class="muted"> / </span><span class="muted" x-text="p.total"></span>
+          </div>
+          <div class="sub">今日 <span x-text="p.calls_today"></span> · 失效 <span x-text="p.hard_revoked"></span></div>
+        </div>
+      </template>
+    </div>
+
+    <div class="card" style="margin-top:24px">
+      <h3 style="margin-bottom:16px;font-size:var(--fs-lg)">平台号池</h3>
+      <table>
+        <thead>
+          <tr><th>平台</th><th>健康 / 总数</th><th>已停用</th><th>失效</th><th>今日调用</th></tr>
+        </thead>
+        <tbody>
+          <template x-for="p in data.platforms || []" :key="p.slug">
+            <tr>
+              <td class="mono" x-text="p.slug"></td>
+              <td><span style="color:var(--ok)" x-text="p.healthy"></span><span class="muted"> / </span><span x-text="p.total"></span></td>
+              <td x-text="p.disabled"></td>
+              <td><span :style="p.hard_revoked>0?'color:var(--danger)':''" x-text="p.hard_revoked"></span></td>
+              <td x-text="p.calls_today"></td>
+            </tr>
+          </template>
+          <tr x-show="!(data.platforms&&data.platforms.length)">
+            <td colspan="5" class="muted" style="text-align:center;padding:24px">暂无数据</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function dashboard() {
+  return {
+    data: {},
+    async load() {
+      try {
+        await guardNav('dashboard');
+        this.data = await api('/stats');
+      } catch (e) {}
+    },
+    pct(v) { return v == null ? '—' : Math.round(v * 100) + '%'; },
+  };
+}
+</script>
+</body>
+</html>

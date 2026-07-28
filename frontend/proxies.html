@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>代理 - Research Tool Key Pool</title>
+<link rel="stylesheet" href="/static/app.css" />
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+<div id="shell">
+  <aside id="nav"></aside>
+  <main id="content" x-data="proxies()" x-init="load()" x-cloak>
+    <div class="page-head">
+      <h1>代理</h1>
+      <button class="btn btn-primary" @click="openCreate()">+ 新建代理组</button>
+    </div>
+
+    <h3 class="sec-title">代理组 · 点击选中查看代理</h3>
+    <div class="grid-cards">
+      <template x-for="grp in groups" :key="grp.id">
+        <div class="card group-card" :class="{selected: selected===grp.id}" @click="selectGroup(grp.id)">
+          <div class="between">
+            <h3 class="mono accent-text" style="margin:0;font-size:var(--fs-md)" x-text="grp.name"></h3>
+            <span x-html="statusBadge(grp.enabled?'available':'manual_disabled')"></span>
+          </div>
+          <div class="muted mono" style="font-size:var(--fs-xs);margin:6px 0;word-break:break-all" x-text="(grp.subscription_url||'').slice(0,56)"></div>
+          <div class="meta">
+            <span x-text="(grp.proxy_count||0) + ' 个代理'"></span>
+            <span x-text="'同步 ' + fmtTime(grp.last_synced_at)"></span>
+          </div>
+          <div class="group-actions" @click.stop>
+            <button class="btn btn-sm" @click="syncGroup(grp.id)">同步</button>
+            <button class="btn btn-sm btn-danger" @click="delGroup(grp.id)">删除</button>
+          </div>
+        </div>
+      </template>
+      <div class="empty" x-show="!groups.length" style="grid-column:1/-1">无代理组 —— 点「新建代理组」</div>
+    </div>
+
+    <!-- 代理列表:仅选中某组后才展示(分页,防上万条撑爆页面)-->
+    <div x-show="selected" x-cloak style="margin-top:32px">
+      <div class="filters">
+        <h3 style="margin:0" x-text="(selectedName()) + ' · 代理列表'"></h3>
+        <input x-model="f.country" @change="reloadProxies()" placeholder="国家代码 如 US" />
+        <span class="muted count-label" x-text="'共 ' + (proxies.total||0) + (proxies.has_more ? '(更多未加载)':'')"></span>
+      </div>
+      <table>
+        <thead><tr><th>host:port</th><th>国家</th><th>exit IP</th><th>延迟</th><th>可用率</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>
+          <template x-for="p in proxies.items || []" :key="p.id">
+            <tr>
+              <td class="mono" x-text="p.host+':'+p.port"></td>
+              <td x-text="countryFlag(p.country_code)"></td>
+              <td class="mono muted" x-text="p.exit_ip || '—'"></td>
+              <td x-text="p.latency_ms!=null ? p.latency_ms+'ms' : '—'"></td>
+              <td x-text="p.availability_rate!=null ? Math.round(p.availability_rate*100)+'%' : '—'"></td>
+              <td><span x-html="statusBadge(p.status)"></span></td>
+              <td><button class="btn btn-sm" @click="toggleProxy(p)" x-text="p.status==='available'?'禁用':'启用'"></button></td>
+            </tr>
+          </template>
+          <tr x-show="!((proxies.items||[]).length)"><td colspan="7" class="muted" style="text-align:center;padding:16px">该组无代理</td></tr>
+        </tbody>
+      </table>
+      <div class="more-row" x-show="proxies.has_more">
+        <button class="btn" @click="loadMore()">加载更多</button>
+      </div>
+    </div>
+
+    <!-- 新建代理组 Modal -->
+    <div class="modal-bg" x-show="g.show" @click.self="g.show=false" x-cloak>
+      <div class="modal">
+        <h3 class="sec-title">新建代理组</h3>
+        <div class="form-row"><label>组名</label><input x-model="g.name" /></div>
+        <div class="form-row"><label>订阅链接(easy_proxies 完整订阅地址,含 token)</label><input x-model="g.url" placeholder="https://your-host/sub/eps_xxx" /></div>
+        <div class="between">
+          <button class="btn" @click="g.show=false">取消</button>
+          <button class="btn btn-primary" @click="createGroup()" :disabled="g.busy">创建</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+<script>
+function proxies() {
+  return {
+    groups: [],
+    selected: null,
+    proxies: {},
+    f: { country: '' },
+    g: { show: false, name: '', url: '', busy: false },
+    async load() {
+      try { await guardNav('proxies'); await this.reloadGroups(); } catch (e) {}
+    },
+    async reloadGroups() {
+      try { this.groups = await api('/proxy-groups'); } catch (e) { toast(String(e), 'err'); }
+    },
+    selectedName() {
+      const g = this.groups.find(x => x.id === this.selected);
+      return g ? g.name : '';
+    },
+    selectGroup(id) {
+      this.selected = id;
+      this.f.country = '';
+      this.reloadProxies();
+    },
+    async reloadProxies() {
+      if (!this.selected) return;
+      const q = new URLSearchParams();
+      q.set('group', this.selected);
+      if (this.f.country) q.set('country', this.f.country);
+      try { this.proxies = await api('/proxies?' + q.toString()); }
+      catch (e) { toast(String(e), 'err'); }
+    },
+    async loadMore() {
+      if (!this.proxies.next_cursor) return;
+      const q = new URLSearchParams();
+      q.set('group', this.selected);
+      if (this.f.country) q.set('country', this.f.country);
+      q.set('cursor', this.proxies.next_cursor);
+      try {
+        const m = await api('/proxies?' + q.toString());
+        this.proxies.items = (this.proxies.items || []).concat(m.items || []);
+        this.proxies.has_more = m.has_more;
+        this.proxies.next_cursor = m.next_cursor;
+      } catch (e) { toast(String(e), 'err'); }
+    },
+    openCreate() { this.g = { show: true, name: '', url: '', busy: false }; },
+    async createGroup() {
+      this.g.busy = true;
+      try {
+        await api('/proxy-groups', { method: 'POST', body: {
+          name: this.g.name, subscription_url: this.g.url,
+        } });
+        toast('已创建', 'ok');
+        await this.reloadGroups();
+        this.g.show = false;
+      } catch (e) { toast(String(e), 'err'); this.g.busy = false; }
+    },
+    async syncGroup(id) {
+      try { const r = await api('/proxy-groups/' + id + '/sync', { method: 'POST' }); toast('同步 ' + r.synced + ' 个代理', 'ok'); await this.reloadGroups(); if (this.selected === id) this.reloadProxies(); }
+      catch (e) { toast(String(e), 'err'); }
+    },
+    async delGroup(id) {
+      if (!confirm('删除该代理组及其所有代理?')) return;
+      try { await api('/proxy-groups/' + id, { method: 'DELETE' }); toast('已删除', 'ok'); if (this.selected === id) { this.selected = null; this.proxies = {}; } await this.reloadGroups(); }
+      catch (e) { toast(String(e), 'err'); }
+    },
+    async toggleProxy(p) {
+      const act = p.status === 'available' ? 'disable' : 'enable';
+      try { await api('/proxies/' + p.id + '/' + act, { method: 'POST' }); this.reloadProxies(); } catch (e) { toast(String(e), 'err'); }
+    },
+  };
+}
+</script>
+</body>
+</html>
