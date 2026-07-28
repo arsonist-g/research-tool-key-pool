@@ -1,26 +1,43 @@
 # 每次 push 到主分支:构建多架构镜像并推送到 GHCR
-#   - 架构:linux/amd64 + linux/arm64
-#   - 版本号:commit 短 SHA(前 7 位,GitHub 短 SHA 标准)
-#   - 每次构建同步刷新 latest
-#   - 镜像名:ghcr.io/<仓库 owner 小写>/research-tool-key-pool(owner 从 Actions 环境取,无需硬编码)
+#   - matrix + native runner:amd64 跑在 amd64 runner,arm64 跑在 arm64 原生 runner(不走 QEMU,编译快)
+#   - 两架构并行 build,各推 -amd64 / -arm64 子标签,再由 manifest job 合并为统一多架构 tag
+#   - 版本号:commit 短 SHA(前 7 位);每次同步刷新 latest
+#   - 镜像名:ghcr.io/<owner 小写>/research-tool-key-pool
 name: docker
 
 on:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-22.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - name: 准备变量(owner 小写 / 短 SHA / 镜像名)
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "IMAGE=ghcr.io/${OWNER}/research-tool-key-pool" >> "$GITHUB_ENV"
+          echo "SHA=${SHA}" >> "$GITHUB_ENV"
 
-      - uses: docker/setup-buildx-action@v3
+      - name: 设置 Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: 登录 GHCR
         uses: docker/login-action@v3
@@ -29,24 +46,44 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 计算镜像名与版本号
-        id: meta
-        run: |
-          # owner 从当前仓库环境取并转小写(GHCR 镜像路径要求小写)
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          # 短 SHA 前 7 位(GitHub 短 SHA 默认 7 位;如需 6 位把 cut -c1-7 改为 cut -c1-6)
-          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "image=ghcr.io/${OWNER}/research-tool-key-pool" >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: 构建并推送(amd64 + arm64)
+      - name: 构建并推送(${{ matrix.arch }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha }}
-            ${{ steps.meta.outputs.image }}:latest
+          provenance: false
+          tags: ${{ env.IMAGE }}:${{ env.SHA }}-${{ matrix.arch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 准备变量
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "IMAGE=ghcr.io/${OWNER}/research-tool-key-pool" >> "$GITHUB_ENV"
+          echo "SHA=${SHA}" >> "$GITHUB_ENV"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建并推送多架构 manifest(:SHA + :latest)
+        run: |
+          IMAGE="${{ env.IMAGE }}"
+          SHA="${{ env.SHA }}"
+          docker manifest create ${IMAGE}:${SHA} \
+            ${IMAGE}:${SHA}-amd64 \
+            ${IMAGE}:${SHA}-arm64
+          docker manifest push ${IMAGE}:${SHA}
+          docker manifest create ${IMAGE}:latest \
+            ${IMAGE}:${SHA}-amd64 \
+            ${IMAGE}:${SHA}-arm64
+          docker manifest push ${IMAGE}:latest
