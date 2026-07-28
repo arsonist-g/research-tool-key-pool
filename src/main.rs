@@ -98,6 +98,7 @@ fn build_router(st: SharedState) -> Router<()> {
         )
         .route("/accounts/{id}/enable", post(api_admin::enable_account))
         .route("/accounts/{id}/disable", post(api_admin::disable_account))
+        .route("/accounts/{id}/activate", post(api_admin::activate_account))
         .route(
             "/proxy-groups",
             get(api_admin::list_proxy_groups).post(api_admin::create_proxy_group),

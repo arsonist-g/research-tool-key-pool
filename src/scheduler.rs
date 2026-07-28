@@ -110,6 +110,47 @@ fn parse_retry_after(headers: &HeaderMap) -> DateTime<Utc> {
     now + ChDuration::seconds(30)
 }
 
+/// 选号失败时定位根因,给出可操作的错误信息(而非笼统的"无可用号")。
+/// 仅在 select 返回 None 的异常分支调用一次,不影响转发热路径。
+async fn diagnose_no_account(pools: &Pools, slug: &str) -> String {
+    // 1. 平台是否绑定了代理组(没绑 → 号永远拿不到代理,这是最常见的配置遗漏)
+    let bound_groups: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM platform_proxy_groups WHERE platform_slug=?",
+    )
+    .bind(slug)
+    .fetch_one(&pools.db)
+    .await
+    .unwrap_or(0);
+    if bound_groups == 0 {
+        return format!("平台 {slug} 未绑定任何代理组,号无法被调度 —— 请在「平台」页为它关联一个代理组");
+    }
+    // 2. 候选号情况(走内存索引)
+    let cands = pools.candidates(slug);
+    if cands.is_empty() {
+        let total: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM accounts WHERE platform_slug=?",
+        )
+        .bind(slug)
+        .fetch_one(&pools.db)
+        .await
+        .unwrap_or(0);
+        if total == 0 {
+            return format!("平台 {slug} 还没有上传任何号");
+        }
+        return format!(
+            "平台 {slug} 的号当前都不可用(已停用 / 已失效 / 退避中),请稍后重试或在号池页检查状态"
+        );
+    }
+    // 3. 有候选但都没绑到可用代理
+    let unbound = cands.iter().filter(|a| a.bound_proxy_id.is_none()).count();
+    if unbound > 0 {
+        return format!(
+            "平台 {slug} 有 {unbound} 个号未绑定代理 —— 请确认代理组已同步且有可用代理"
+        );
+    }
+    format!("平台 {slug} 候选号绑定的代理当前都不可用,请稍后重试")
+}
+
 /// 主转发入口
 pub async fn forward(
     pools: &Pools,
@@ -142,13 +183,9 @@ pub async fn forward(
         let (acct, proxy) = match chosen {
             Some(x) => x,
             None => {
-                if retries >= settings.max_retries {
-                    return Err(AppError::unavailable(format!(
-                        "平台 {} 无可用号",
-                        cfg.slug
-                    )));
-                }
-                return Err(AppError::unavailable(format!("平台 {} 无可用号", cfg.slug)));
+                // 没选中号:重试无意义(候选号不会在重试间凭空出现),直接诊断根因返回
+                let reason = diagnose_no_account(pools, &cfg.slug).await;
+                return Err(AppError::unavailable(reason));
             }
         };
 
@@ -316,6 +353,165 @@ pub async fn forward(
                 "平台 {} 重试耗尽,所有候选号均不可用",
                 cfg.slug
             )));
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ProbeAcctRow {
+    platform_slug: String,
+    encrypted_key: Vec<u8>,
+    bound_proxy_id: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProbePlatRow {
+    revoke_codes: String,
+    rate_limit_codes: String,
+    upstream_timeout_secs: i64,
+}
+
+/// 测活结果(手动激活 / 上传时激活)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    Alive,
+    Revoked,
+    Unknown,
+    Skipped,
+}
+
+pub struct ProbeResult {
+    pub outcome: ProbeOutcome,
+    pub status: Option<u16>,
+    pub reason: String,
+}
+
+/// 测活(激活):对单个号经其绑定代理发一次最小代价的探测请求,按上游响应码判定 key 是否有效。
+/// 走绑定代理(注册 IP 出口,符合同 IP 隔离);未绑代理则先尝试绑定,仍无则跳过(保持原状态)。
+/// 判定:2xx→healthy;命中封号码→hard_revoked;其余(限流 / 瞬时 / 网络错误)→ 不动状态。
+pub async fn probe_account(
+    pools: &Pools,
+    registry: &Registry,
+    proxy_clients: &ProxyClientPool,
+    account_id: i64,
+) -> ProbeResult {
+    let row: Option<ProbeAcctRow> =
+        sqlx::query_as("SELECT platform_slug, encrypted_key, bound_proxy_id FROM accounts WHERE id=?")
+            .bind(account_id)
+            .fetch_optional(&pools.db)
+            .await
+            .ok()
+            .flatten();
+    let row = match row {
+        Some(r) => r,
+        None => {
+            return ProbeResult {
+                outcome: ProbeOutcome::Skipped,
+                status: None,
+                reason: "号不存在".into(),
+            }
+        }
+    };
+    let adapter = match registry.get(&row.platform_slug) {
+        Some(a) => a,
+        None => {
+            return ProbeResult {
+                outcome: ProbeOutcome::Skipped,
+                status: None,
+                reason: "平台未注册".into(),
+            }
+        }
+    };
+    let key = match crate::crypto::decrypt(&pools.aes_key, &row.encrypted_key)
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    {
+        Some(k) => k,
+        None => {
+            return ProbeResult {
+                outcome: ProbeOutcome::Skipped,
+                status: None,
+                reason: "key 解密失败".into(),
+            }
+        }
+    };
+    // 走绑定代理:未绑则先尝试绑定(吸附注册 IP);仍无代理 → 跳过(保持原状态,不误判)
+    let mut bound_proxy_id = row.bound_proxy_id;
+    if bound_proxy_id.is_none() {
+        crate::sync::bind_account(pools, account_id, None).await;
+        bound_proxy_id =
+            sqlx::query_scalar::<_, i64>("SELECT bound_proxy_id FROM accounts WHERE id=?")
+                .bind(account_id)
+                .fetch_optional(&pools.db)
+                .await
+                .ok()
+                .flatten();
+    }
+    let pid = match bound_proxy_id {
+        Some(p) => p,
+        None => {
+            return ProbeResult {
+                outcome: ProbeOutcome::Skipped,
+                status: None,
+                reason: "未绑定代理,无法测活(请先为平台绑定代理组并同步代理)".into(),
+            }
+        }
+    };
+    let proxy = match pools.get_proxy(pid) {
+        Some(p) => p,
+        None => {
+            return ProbeResult {
+                outcome: ProbeOutcome::Skipped,
+                status: None,
+                reason: "绑定的代理不存在".into(),
+            }
+        }
+    };
+    let plat: ProbePlatRow = sqlx::query_as(
+        "SELECT revoke_codes, rate_limit_codes, upstream_timeout_secs FROM platforms WHERE slug=?",
+    )
+    .bind(&row.platform_slug)
+    .fetch_one(&pools.db)
+    .await
+    .unwrap_or(ProbePlatRow {
+        revoke_codes: "401".into(),
+        rate_limit_codes: "429".into(),
+        upstream_timeout_secs: 120,
+    });
+    let codes = crate::adapter::StatusCodes::parse(&plat.revoke_codes, &plat.rate_limit_codes);
+    let client = proxy_clients.client_for(&proxy, plat.upstream_timeout_secs as u64);
+
+    match adapter.probe_key(&client, &key).await {
+        None => ProbeResult {
+            outcome: ProbeOutcome::Unknown,
+            status: None,
+            reason: "探测请求失败(网络 / 代理错误,未拿到上游响应)".into(),
+        },
+        Some(status) => {
+            let code = status.as_u16();
+            match adapter.classify(status, &codes) {
+                CallOutcome::Success => {
+                    let _ = pools.set_status(account_id, "healthy").await;
+                    ProbeResult {
+                        outcome: ProbeOutcome::Alive,
+                        status: Some(code),
+                        reason: format!("探测成功({code}),号已标记健康"),
+                    }
+                }
+                CallOutcome::HardRevoked => {
+                    let _ = pools.set_status(account_id, "hard_revoked").await;
+                    ProbeResult {
+                        outcome: ProbeOutcome::Revoked,
+                        status: Some(code),
+                        reason: format!("命中封号码({code}),号已标记失效"),
+                    }
+                }
+                _ => ProbeResult {
+                    outcome: ProbeOutcome::Unknown,
+                    status: Some(code),
+                    reason: format!("探测返回 {code}(限流 / 瞬时错误),无法判定,保持原状态"),
+                },
+            }
         }
     }
 }

@@ -16,11 +16,19 @@
       <button class="btn btn-primary" @click="openUpload()">+ 上传号</button>
     </div>
 
-    <!-- 平台切换条:点击切平台,默认只看一个平台,不再混在一起 -->
+    <!-- 平台切换条:每个 tab 标注是否已绑代理组(未绑则号无法调度) -->
     <div class="tabs">
       <template x-for="slug in platforms" :key="slug">
-        <button class="tab" :class="{active: tab===slug}" @click="switchTab(slug)" x-text="slug"></button>
+        <button class="tab" :class="{active: tab===slug}" @click="switchTab(slug)">
+          <span x-text="slug"></span>
+          <span class="tab-mark tm-ok" x-show="platBound(slug)" x-cloak>✓</span>
+          <span class="tab-mark tm-warn" x-show="!platBound(slug)" x-cloak>⚠ 未绑代理</span>
+        </button>
       </template>
+    </div>
+
+    <div class="banner banner-warn" x-show="platInfo[tab] && !platBound(tab)" x-cloak>
+      该平台尚未绑定任何代理组 —— 号无法被调度转发。请到「平台」页为 <b x-text="tab"></b> 关联一个代理组后再上传或调用。
     </div>
 
     <div class="filters">
@@ -79,6 +87,11 @@
           <label>额度上限(可选,覆盖平台默认)</label>
           <input type="number" x-model.number="upload.quota" placeholder="留空用平台默认" />
         </div>
+        <div class="form-row">
+          <label class="field-inline" style="font-size:var(--fs-sm);color:var(--text-secondary)">
+            <input type="checkbox" x-model="upload.activate" style="width:auto" /> 上传后立即测活(经绑定代理验证每个 key;Exa / Context7 会消耗 1 次该平台调用)
+          </label>
+        </div>
         <div class="between">
           <button class="btn" @click="upload.show=false">取消</button>
           <button class="btn btn-primary" @click="submitUpload()" :disabled="upload.busy">上传</button>
@@ -107,6 +120,7 @@
             <div class="between" style="margin-top:16px">
               <button class="btn btn-danger btn-sm" @click="del(detail.data.account.id)">删除</button>
               <div class="row">
+                <button class="btn btn-sm btn-primary" @click="activate(detail.data.account)">测活</button>
                 <button class="btn btn-sm" @click="toggle(detail.data.account, 'manual_disabled')" x-show="detail.data.account.status!=='manual_disabled'">停用</button>
                 <button class="btn btn-sm" @click="toggle(detail.data.account, 'healthy')" x-show="detail.data.account.status==='manual_disabled'">启用</button>
                 <button class="btn" @click="detail.show=false">关闭</button>
@@ -127,14 +141,21 @@ function accounts() {
     origin: location.origin,
     tab: 'context7',
     data: {}, loading: false,
+    platInfo: {},
     f: { status: '' },
-    upload: { show: false, platform: 'context7', keys: '', quota: '', busy: false },
+    upload: { show: false, platform: 'context7', keys: '', quota: '', busy: false, activate: false },
     detail: { show: false, loading: false, data: null },
     async load() {
       try {
         await guardNav('accounts');
+        const plats = await api('/platforms');
+        this.platInfo = Object.fromEntries(plats.map(p => [p.slug, p]));
         await this.reload();
       } catch (e) {}
+    },
+    platBound(slug) {
+      const p = this.platInfo[slug];
+      return !!(p && Array.isArray(p.proxy_group_ids) && p.proxy_group_ids.length > 0);
     },
     switchTab(slug) { this.tab = slug; this.reload(); },
     async reload() {
@@ -147,7 +168,7 @@ function accounts() {
       } catch (e) { toast(String(e), 'err'); }
       this.loading = false;
     },
-    openUpload() { this.upload.platform = this.tab; this.upload.keys = ''; this.upload.quota = ''; this.upload.show = true; },
+    openUpload() { this.upload.platform = this.tab; this.upload.keys = ''; this.upload.quota = ''; this.upload.activate = false; this.upload.show = true; },
     async loadMore() {
       if (!this.data.next_cursor) return;
       const q = new URLSearchParams();
@@ -175,9 +196,16 @@ function accounts() {
       try {
         const r = await api(`/platforms/${this.upload.platform}/accounts`, {
           method: 'POST',
-          body: { accounts, default_quota_limit: this.upload.quota || null },
+          body: { accounts, default_quota_limit: this.upload.quota || null, activate: this.upload.activate },
         });
-        toast('已上传 ' + (r.created?.length || 0) + ' 个号', 'ok');
+        if (this.upload.activate && r.created?.length) {
+          const stat = {};
+          r.created.forEach(c => { stat[c.status] = (stat[c.status] || 0) + 1; });
+          const parts = Object.entries(stat).map(([k, v]) => `${k}:${v}`).join(' ');
+          toast('已上传并测活 ' + r.created.length + ' 个号(' + parts + ')', 'ok');
+        } else {
+          toast('已上传 ' + (r.created?.length || 0) + ' 个号', 'ok');
+        }
         this.upload.show = false;
         this.tab = this.upload.platform;
         this.reload();
@@ -193,6 +221,14 @@ function accounts() {
       try {
         await api(`/accounts/${acc.id}/${target === 'healthy' ? 'enable' : 'disable'}`, { method: 'POST' });
         toast('已更新', 'ok');
+        this.openDetail(acc.id);
+        this.reload();
+      } catch (e) { toast(String(e), 'err'); }
+    },
+    async activate(acc) {
+      try {
+        const r = await api('/accounts/' + acc.id + '/activate', { method: 'POST' });
+        toast(r.reason, r.outcome === 'alive' ? 'ok' : (r.outcome === 'revoked' ? 'err' : ''));
         this.openDetail(acc.id);
         this.reload();
       } catch (e) { toast(String(e), 'err'); }

@@ -113,6 +113,11 @@ pub trait PlatformAdapter: Send + Sync {
     fn supports_balance_query(&self) -> bool {
         false
     }
+
+    /// 测活:向平台发一个最小代价的探测请求,返回上游 HTTP status。
+    /// 返回 None 表示请求未能发出或无响应(网络 / 代理错误);返回 Some 即拿到上游响应,
+    /// 由调用方结合平台判定码分类(2xx=活,封号码=失效,其余=未知,不动状态)。
+    async fn probe_key(&self, _client: &reqwest::Client, _real_key: &str) -> Option<StatusCode>;
 }
 
 // —— 四平台 ——
@@ -136,6 +141,15 @@ impl PlatformAdapter for Context7 {
     fn apply_auth(&self, h: &mut HeaderMap, key: &str) {
         set_bearer(h, key);
     }
+    async fn probe_key(&self, client: &reqwest::Client, key: &str) -> Option<StatusCode> {
+        let resp = client
+            .get("https://context7.com/api/v2/search?query=react")
+            .bearer_auth(key)
+            .send()
+            .await
+            .ok()?;
+        Some(resp.status())
+    }
 }
 
 #[async_trait::async_trait]
@@ -148,6 +162,17 @@ impl PlatformAdapter for Exa {
             h.insert("x-api-key", v);
         }
     }
+    async fn probe_key(&self, client: &reqwest::Client, key: &str) -> Option<StatusCode> {
+        // Exa 无免费探测端点;发一次最小 search(numResults=1)验证 key,消耗 1 次搜索额度
+        let resp = client
+            .post("https://api.exa.ai/search")
+            .header("x-api-key", key)
+            .json(&serde_json::json!({"query":"exa.ai","numResults":1}))
+            .send()
+            .await
+            .ok()?;
+        Some(resp.status())
+    }
 }
 
 #[async_trait::async_trait]
@@ -157,6 +182,15 @@ impl PlatformAdapter for Firecrawl {
     }
     fn apply_auth(&self, h: &mut HeaderMap, key: &str) {
         set_bearer(h, key);
+    }
+    async fn probe_key(&self, client: &reqwest::Client, key: &str) -> Option<StatusCode> {
+        let resp = client
+            .get("https://api.firecrawl.dev/v2/team/credit-usage")
+            .bearer_auth(key)
+            .send()
+            .await
+            .ok()?;
+        Some(resp.status())
     }
     fn supports_balance_query(&self) -> bool {
         true
@@ -186,6 +220,15 @@ impl PlatformAdapter for Tavily {
     }
     fn apply_auth(&self, h: &mut HeaderMap, key: &str) {
         set_bearer(h, key);
+    }
+    async fn probe_key(&self, client: &reqwest::Client, key: &str) -> Option<StatusCode> {
+        let resp = client
+            .get("https://api.tavily.com/usage")
+            .bearer_auth(key)
+            .send()
+            .await
+            .ok()?;
+        Some(resp.status())
     }
     fn supports_balance_query(&self) -> bool {
         true

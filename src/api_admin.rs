@@ -327,6 +327,9 @@ pub struct UploadReq {
     accounts: Vec<UploadItem>,
     #[serde(default)]
     default_quota_limit: Option<i64>,
+    /// 上传后是否立即对每个号测活(同步:并发探测完才返回,每号经其绑定代理)
+    #[serde(default)]
+    activate: bool,
 }
 #[derive(Deserialize)]
 pub struct UploadItem {
@@ -394,7 +397,24 @@ pub async fn upload_accounts(
             },
         );
         sync::bind_account(&st.pools, id, item.registration_ip.as_deref()).await;
-        created.push(json!({"id": id, "key_preview": preview}));
+        // 上传后测活:经绑定代理探测,按结果设初始状态(healthy / hard_revoked / 保持 pending)
+        let status = if req.activate {
+            let r = crate::scheduler::probe_account(
+                &st.pools,
+                &st.registry,
+                &st.proxy_clients,
+                id,
+            )
+            .await;
+            match r.outcome {
+                crate::scheduler::ProbeOutcome::Alive => "healthy",
+                crate::scheduler::ProbeOutcome::Revoked => "hard_revoked",
+                _ => "pending",
+            }
+        } else {
+            "pending"
+        };
+        created.push(json!({"id": id, "key_preview": preview, "status": status}));
     }
     Ok(Json(json!({"created": created, "skipped": 0})))
 }
@@ -537,6 +557,27 @@ pub async fn delete_account(
     st.pools.accounts.remove(&id);
     st.pools.acct_permits.remove(&id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 手动测活(激活)单个号:经其绑定代理发探测请求,返回结果并更新状态
+pub async fn activate_account(
+    State(st): State<SharedState>,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Value>> {
+    let r =
+        crate::scheduler::probe_account(&st.pools, &st.registry, &st.proxy_clients, id).await;
+    let outcome = match r.outcome {
+        crate::scheduler::ProbeOutcome::Alive => "alive",
+        crate::scheduler::ProbeOutcome::Revoked => "revoked",
+        crate::scheduler::ProbeOutcome::Unknown => "unknown",
+        crate::scheduler::ProbeOutcome::Skipped => "skipped",
+    };
+    Ok(Json(json!({
+        "id": id,
+        "outcome": outcome,
+        "status_code": r.status,
+        "reason": r.reason
+    })))
 }
 
 // —— 代理组 ——

@@ -96,11 +96,17 @@ pub async fn require_forward(
 ) -> Result<Response, AppError> {
     let token = {
         let h = req.headers();
-        h.get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer ").map(|x| x.trim().to_string()))
+        // 统一 Authorization: Bearer;其次兼容 x-api-key(Exa 等原生客户端固定用此头发认证,
+        // 把分发 token 作为 x-api-key 传入;网关内部仍会替换为真实平台 key,上游认证不变)
+        if let Some(v) = h.get("authorization").and_then(|v| v.to_str().ok()) {
+            v.strip_prefix("Bearer ").map(|x| x.trim().to_string())
+        } else {
+            h.get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        }
     };
-    let token = token.ok_or_else(|| AppError::unauthorized("缺少 Authorization Bearer token"))?;
+    let token = token.ok_or_else(|| AppError::unauthorized("缺少 Authorization Bearer 或 x-api-key token"))?;
     let hash = crate::crypto::sha256_hex(&token);
     #[derive(sqlx::FromRow)]
     struct TokenRow {
