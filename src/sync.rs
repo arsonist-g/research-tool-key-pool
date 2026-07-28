@@ -430,3 +430,187 @@ pub fn start_workers(pools: Arc<Pools>, registry: Arc<Registry>, http: reqwest::
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*; // bind_account
+    use crate::db;
+    use crate::models::{AccountSlot, ProxyEntry};
+    use crate::pools::Pools;
+    use chrono::Utc;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// 内存 SQLite + 完整 schema + 一个平台 / 代理组 / 一个代理
+    async fn setup() -> Pools {
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        db::migrate(&pool).await.unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO platforms (slug,display_name,created_at,updated_at) VALUES ('exa','Exa',?,?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO proxy_groups (name,subscription_url,enabled,created_at,updated_at) VALUES ('g','http://x',1,?,?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO proxies (group_id,host,port,exit_ip,status,last_synced_at) VALUES (1,'1.1.1.1',8080,'2.2.2.2','available',?)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let pools = Pools::new(pool, [0u8; 32]);
+        pools.proxies.insert(
+            1,
+            ProxyEntry {
+                id: 1,
+                group_id: 1,
+                host: "1.1.1.1".into(),
+                port: 8080,
+                username: None,
+                password: None,
+                exit_ip: Some("2.2.2.2".into()),
+                status: "available".into(),
+            },
+        );
+        pools
+    }
+
+    fn slot(id: i64, bound: Option<i64>) -> AccountSlot {
+        AccountSlot {
+            id,
+            platform_slug: "exa".into(),
+            decrypted_key: "k".into(),
+            bound_proxy_id: bound,
+            status: "pending".into(),
+            quota_limit: None,
+            quota_used: 0,
+            reset_at: None,
+            last_called_at: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    async fn insert_account(pools: &Pools, id: i64) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO accounts (id,platform_slug,encrypted_key,key_preview,status,upload_source,created_at,updated_at) VALUES (?,?,x'00','prev','pending','api',?,?)",
+        )
+        .bind(id)
+        .bind("exa")
+        .bind(now)
+        .bind(now)
+        .execute(&pools.db)
+        .await
+        .unwrap();
+        pools.accounts.insert(id, slot(id, None));
+    }
+
+    /// 回归(用户踩坑根因):平台没绑代理组时,号上传后 bind_account 不绑,保持未绑
+    #[tokio::test]
+    async fn account_stays_unbound_when_platform_has_no_group() {
+        let pools = setup().await;
+        insert_account(&pools, 1).await;
+        bind_account(&pools, 1, None).await;
+        let bound: Option<i64> =
+            sqlx::query_scalar("SELECT bound_proxy_id FROM accounts WHERE id=1")
+                .fetch_one(&pools.db)
+                .await
+                .unwrap();
+        assert!(bound.is_none(), "平台未绑代理组时,号应保持未绑");
+    }
+
+    /// 回归(修复路径):先上传号(无组,未绑)→ 后绑组 → bind_account 重绑到代理 → candidates 选中
+    #[tokio::test]
+    async fn account_rebinds_after_group_attached_and_becomes_selectable() {
+        let pools = setup().await;
+        insert_account(&pools, 1).await;
+        // 绑组前:未绑
+        bind_account(&pools, 1, None).await;
+        let before: Option<i64> =
+            sqlx::query_scalar("SELECT bound_proxy_id FROM accounts WHERE id=1")
+                .fetch_one(&pools.db)
+                .await
+                .unwrap();
+        assert!(before.is_none());
+        // 绑组(模拟用户在平台页关联代理组)
+        sqlx::query("INSERT INTO platform_proxy_groups (platform_slug,proxy_group_id) VALUES ('exa',1)")
+            .execute(&pools.db)
+            .await
+            .unwrap();
+        // 重绑(模拟 patch_platform / sync_group 触发的 rebind_null_accounts)
+        bind_account(&pools, 1, None).await;
+        let after: Option<i64> =
+            sqlx::query_scalar("SELECT bound_proxy_id FROM accounts WHERE id=1")
+                .fetch_one(&pools.db)
+                .await
+                .unwrap();
+        assert_eq!(after, Some(1), "绑组后号应被绑到代理 1");
+        assert_eq!(pools.accounts.get(&1).unwrap().bound_proxy_id, Some(1));
+        let cands = pools.candidates("exa");
+        assert!(cands.iter().any(|c| c.id == 1), "绑代理后号应能被 candidates 选中");
+    }
+
+    /// 注册 IP 吸附:号的 registration_ip 命中某代理 exit_ip 时优先绑该代理
+    #[tokio::test]
+    async fn bind_prefers_registration_ip_match() {
+        let pools = setup().await;
+        let now = Utc::now();
+        // 第二个代理,exit_ip=9.9.9.9
+        sqlx::query(
+            "INSERT INTO proxies (group_id,host,port,exit_ip,status,last_synced_at) VALUES (1,'3.3.3.3',9090,'9.9.9.9','available',?)",
+        )
+        .bind(now)
+        .execute(&pools.db)
+        .await
+        .unwrap();
+        pools.proxies.insert(
+            2,
+            ProxyEntry {
+                id: 2,
+                group_id: 1,
+                host: "3.3.3.3".into(),
+                port: 9090,
+                username: None,
+                password: None,
+                exit_ip: Some("9.9.9.9".into()),
+                status: "available".into(),
+            },
+        );
+        sqlx::query("INSERT INTO platform_proxy_groups (platform_slug,proxy_group_id) VALUES ('exa',1)")
+            .execute(&pools.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (id,platform_slug,encrypted_key,key_preview,registration_ip,status,upload_source,created_at,updated_at) VALUES (?,?,x'00','prev','9.9.9.9','pending','api',?,?)",
+        )
+        .bind(1)
+        .bind("exa")
+        .bind(now)
+        .bind(now)
+        .execute(&pools.db)
+        .await
+        .unwrap();
+        pools.accounts.insert(1, slot(1, None));
+        bind_account(&pools, 1, Some("9.9.9.9")).await;
+        let bound: i64 = sqlx::query_scalar("SELECT bound_proxy_id FROM accounts WHERE id=1")
+            .fetch_one(&pools.db)
+            .await
+            .unwrap();
+        assert_eq!(bound, 2, "号应吸附到 exit_ip 匹配 registration_ip 的代理 2");
+    }
+}
